@@ -1,0 +1,13 @@
+[workspace]
+members = [
+    "programs/terra-vault",
+    "programs/terra-attestation",
+    "programs/terra-marketplace",
+    "indexer"
+]
+resolver = "2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+overflow-checks = true

@@ -1,0 +1,12 @@
+[package]
+name = "terra-marketplace"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anchor-lang = "0.29.0"
+anchor-spl = "0.29.0"
+solana-program = "1.18"
+
+[features]
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
