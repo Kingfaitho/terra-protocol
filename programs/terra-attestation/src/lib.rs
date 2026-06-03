@@ -56,6 +56,12 @@ pub enum DisputeError {
 
     #[msg("Asset does not match the dispute record")]
     AssetMismatch = 6206,
+
+    #[msg("Dispute must be Dismissed to claim bond refund")]
+    DisputeNotDismissed = 6207,
+
+    #[msg("Bond amount must be at least the minimum (1M lamports = 0.001 SOL)")]
+    BondTooSmall = 6208,
 }
 
 // ─── Events ───────────────────────────────────────────────────────────────────
@@ -124,6 +130,29 @@ pub struct AgentSlashed {
     pub agent: Pubkey,
     pub slash_amount: u64,
     pub remaining_stake: u64,
+    pub timestamp: i64,
+}
+
+#[event]
+pub struct DisputeRewardClaimed {
+    pub dispute: Pubkey,
+    pub disputer: Pubkey,
+    pub disputer_share: u64,
+    pub treasury_share: u64,
+    pub timestamp: i64,
+}
+
+#[event]
+pub struct DismissedBondForfeited {
+    pub dispute: Pubkey,
+    pub bond_amount: u64,
+    pub timestamp: i64,
+}
+
+#[event]
+pub struct TreasuryInitialized {
+    pub treasury: Pubkey,
+    pub authority: Pubkey,
     pub timestamp: i64,
 }
 
@@ -324,12 +353,13 @@ pub mod terra_attestation {
     /// Raise a dispute against a Verified asset.
     /// Posting a bond signals economic commitment — spam disputes cost real SOL.
     /// The asset immediately flips to Disputed, pausing any linked vault's interest.
+    /// Bond must meet minimum (1M lamports) to prevent griefing.
     pub fn raise_dispute(
         ctx: Context<RaiseDispute>,
         evidence_hash: [u8; 32],
         bond_amount: u64,
     ) -> Result<()> {
-        require!(bond_amount > 0, DisputeError::InvalidBondAmount);
+        require!(bond_amount >= MIN_DISPUTE_BOND, DisputeError::BondTooSmall);
         require!(
             ctx.accounts.asset.status == AssetStatus::Verified,
             DisputeError::AssetNotVerifiable
@@ -465,6 +495,80 @@ pub mod terra_attestation {
             agent: ctx.accounts.agent.key(),
             slash_amount,
             remaining_stake,
+            timestamp: now,
+        });
+
+        Ok(())
+    }
+
+    // ─── Reward distribution (Phase 3 Step 2) ──────────────────────────────────
+
+    /// Initialize the treasury singleton. v1: set once at deployment.
+    /// Authority can be a multisig (for v2 upgrade path).
+    pub fn initialize_treasury(ctx: Context<InitializeTreasury>) -> Result<()> {
+        let treasury = &mut ctx.accounts.treasury;
+        treasury.authority = ctx.accounts.authority.key();
+        treasury.bump = ctx.bumps.treasury;
+
+        emit!(TreasuryInitialized {
+            treasury: ctx.accounts.treasury.key(),
+            authority: ctx.accounts.authority.key(),
+            timestamp: Clock::get()?.unix_timestamp,
+        });
+
+        Ok(())
+    }
+
+    /// Claim reward from an Upheld dispute: 70% to disputer, 30% to treasury.
+    /// Total payout = bond_amount + total_slashed.
+    /// Only callable when dispute status is Upheld.
+    pub fn claim_upheld_dispute(ctx: Context<ClaimUpheldDispute>) -> Result<()> {
+        let now = Clock::get()?.unix_timestamp;
+        let dispute = &mut ctx.accounts.dispute;
+
+        let total_pool = dispute.bond_amount
+            .checked_add(dispute.total_slashed)
+            .ok_or(AttestationError::ArithmeticOverflow)?;
+
+        // 70% to disputer, 30% to treasury
+        let disputer_share = (total_pool * 70u64) / 100u64;
+        let treasury_share = total_pool.saturating_sub(disputer_share);
+
+        // Transfer disputer share
+        **dispute.to_account_info().try_borrow_mut_lamports()? -= disputer_share;
+        **ctx.accounts.disputer.to_account_info().try_borrow_mut_lamports()? += disputer_share;
+
+        // Transfer treasury share
+        **dispute.to_account_info().try_borrow_mut_lamports()? -= treasury_share;
+        **ctx.accounts.treasury.to_account_info().try_borrow_mut_lamports()? += treasury_share;
+
+        emit!(DisputeRewardClaimed {
+            dispute: dispute.key(),
+            disputer: ctx.accounts.disputer.key(),
+            disputer_share,
+            treasury_share,
+            timestamp: now,
+        });
+
+        Ok(())
+    }
+
+    /// Claim from a Dismissed dispute: 100% of bond goes to treasury.
+    /// Disputer gets nothing — false accusations are expensive.
+    /// Only callable when dispute status is Dismissed.
+    pub fn claim_dismissed_dispute(ctx: Context<ClaimDismissedDispute>) -> Result<()> {
+        let now = Clock::get()?.unix_timestamp;
+        let dispute = &mut ctx.accounts.dispute;
+
+        let bond = dispute.bond_amount;
+
+        // Transfer bond to treasury
+        **dispute.to_account_info().try_borrow_mut_lamports()? -= bond;
+        **ctx.accounts.treasury.to_account_info().try_borrow_mut_lamports()? += bond;
+
+        emit!(DismissedBondForfeited {
+            dispute: dispute.key(),
+            bond_amount: bond,
             timestamp: now,
         });
 

@@ -111,6 +111,14 @@ pub struct SlashRecord {
     pub bump: u8,
 }
 
+/// Treasury singleton PDA. Accumulates 30% of upheld dispute proceeds + dismissed bonds.
+/// Authority: multisig or DAO (v2 upgrade path). v1: set once at initialization.
+#[account]
+pub struct Treasury {
+    pub authority: Pubkey, // Who can withdraw from treasury (multisig address or admin)
+    pub bump: u8,
+}
+
 // ─── Space Constants ─────────────────────────────────────────────────────────
 
 // 8 discriminator + 32 authority + 8 stake + 8 reputation + 4 active_count + 8 registered_at + 1 bump
@@ -132,6 +140,15 @@ pub const DISPUTE_SIZE: usize = 8 + 32 + 32 + 32 + 8 + 1 + 1 + 8 + 8 + 1;
 
 // 8 + 32 dispute + 32 agent + 8 slash_amount + 1 bump
 pub const SLASH_RECORD_SIZE: usize = 8 + 32 + 32 + 8 + 1;
+
+// 8 + 32 authority + 1 bump
+pub const TREASURY_SIZE: usize = 8 + 32 + 1;
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+/// Minimum bond to raise a dispute. Prevents spam (cheap false accusations).
+/// 1M lamports = 0.001 SOL. Dismissal sends this to treasury, making griefing expensive.
+pub const MIN_DISPUTE_BOND: u64 = 1_000_000;
 
 // ─── Accounts Contexts ────────────────────────────────────────────────────────
 
@@ -352,6 +369,67 @@ pub struct SlashAgent<'info> {
         bump
     )]
     pub slash_record: Account<'info, SlashRecord>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct ClaimUpheldDispute<'info> {
+    /// Dispute must be in Upheld status to claim.
+    #[account(
+        mut,
+        seeds = [b"dispute", dispute.asset.as_ref(), dispute.disputer.as_ref()],
+        bump = dispute.bump,
+        constraint = dispute.status == DisputeStatus::Upheld @ crate::DisputeError::DisputeNotUpheld
+    )]
+    pub dispute: Account<'info, Dispute>,
+
+    /// The disputer claims their 70% share of (bond + slashes).
+    #[account(mut)]
+    pub disputer: SystemAccount<'info>,
+
+    /// Treasury receives 30% of (bond + slashes).
+    #[account(
+        mut,
+        seeds = [b"treasury"],
+        bump = treasury.bump
+    )]
+    pub treasury: Account<'info, Treasury>,
+}
+
+#[derive(Accounts)]
+pub struct ClaimDismissedDispute<'info> {
+    /// Dispute must be in Dismissed status to claim.
+    #[account(
+        mut,
+        seeds = [b"dispute", dispute.asset.as_ref(), dispute.disputer.as_ref()],
+        bump = dispute.bump,
+        constraint = dispute.status == DisputeStatus::Dismissed @ crate::DisputeError::DisputeNotDismissed
+    )]
+    pub dispute: Account<'info, Dispute>,
+
+    /// Treasury receives the full bond amount (disputer gets nothing).
+    #[account(
+        mut,
+        seeds = [b"treasury"],
+        bump = treasury.bump
+    )]
+    pub treasury: Account<'info, Treasury>,
+}
+
+#[derive(Accounts)]
+pub struct InitializeTreasury<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        init,
+        payer = authority,
+        space = TREASURY_SIZE,
+        seeds = [b"treasury"],
+        bump
+    )]
+    pub treasury: Account<'info, Treasury>,
 
     pub system_program: Program<'info, System>,
 }
