@@ -32,6 +32,32 @@ pub enum AttestationError {
     ArithmeticOverflow = 6106,
 }
 
+/// Dispute-specific errors in a separate enum to keep ranges distinct.
+/// Range: 6200+ (distinct from AttestationError 6100–6106)
+#[error_code]
+pub enum DisputeError {
+    #[msg("Only a Verified asset can be disputed")]
+    AssetNotVerifiable = 6200,
+
+    #[msg("Dispute must be Active to resolve")]
+    DisputeNotActive = 6201,
+
+    #[msg("Dispute must be Upheld to slash agents")]
+    DisputeNotUpheld = 6202,
+
+    #[msg("Only the registered resolver admin can resolve disputes")]
+    ResolverOnly = 6203,
+
+    #[msg("Bond amount must be greater than 0")]
+    InvalidBondAmount = 6204,
+
+    #[msg("Agent has no remaining stake to slash")]
+    AgentStakeExhausted = 6205,
+
+    #[msg("Asset does not match the dispute record")]
+    AssetMismatch = 6206,
+}
+
 // ─── Events ───────────────────────────────────────────────────────────────────
 
 #[event]
@@ -72,6 +98,32 @@ pub struct AssetAttested {
 pub struct AssetLinkedToVault {
     pub asset: Pubkey,
     pub vault: Pubkey,
+    pub timestamp: i64,
+}
+
+#[event]
+pub struct DisputeRaised {
+    pub dispute: Pubkey,
+    pub asset: Pubkey,
+    pub disputer: Pubkey,
+    pub bond_amount: u64,
+    pub timestamp: i64,
+}
+
+#[event]
+pub struct DisputeResolved {
+    pub dispute: Pubkey,
+    pub asset: Pubkey,
+    pub upheld: bool,
+    pub timestamp: i64,
+}
+
+#[event]
+pub struct AgentSlashed {
+    pub dispute: Pubkey,
+    pub agent: Pubkey,
+    pub slash_amount: u64,
+    pub remaining_stake: u64,
     pub timestamp: i64,
 }
 
@@ -251,6 +303,168 @@ pub mod terra_attestation {
         emit!(AssetLinkedToVault {
             asset: ctx.accounts.asset.key(),
             vault,
+            timestamp: now,
+        });
+
+        Ok(())
+    }
+
+    // ─── Dispute instructions ──────────────────────────────────────────────────
+
+    /// One-time setup: register the admin resolver.
+    /// v1: centrally adjudicated. Caller becomes the authority.
+    /// Deployer must call this immediately after deployment to prevent front-running.
+    pub fn initialize_resolver(ctx: Context<InitializeResolver>) -> Result<()> {
+        let dr = &mut ctx.accounts.dispute_resolver;
+        dr.authority = ctx.accounts.authority.key();
+        dr.bump = ctx.bumps.dispute_resolver;
+        Ok(())
+    }
+
+    /// Raise a dispute against a Verified asset.
+    /// Posting a bond signals economic commitment — spam disputes cost real SOL.
+    /// The asset immediately flips to Disputed, pausing any linked vault's interest.
+    pub fn raise_dispute(
+        ctx: Context<RaiseDispute>,
+        evidence_hash: [u8; 32],
+        bond_amount: u64,
+    ) -> Result<()> {
+        require!(bond_amount > 0, DisputeError::InvalidBondAmount);
+        require!(
+            ctx.accounts.asset.status == AssetStatus::Verified,
+            DisputeError::AssetNotVerifiable
+        );
+
+        let now = Clock::get()?.unix_timestamp;
+
+        let dispute = &mut ctx.accounts.dispute;
+        dispute.asset = ctx.accounts.asset.key();
+        dispute.disputer = ctx.accounts.disputer.key();
+        dispute.evidence_hash = evidence_hash;
+        dispute.bond_amount = bond_amount;
+        dispute.status = DisputeStatus::Active;
+        dispute.agents_slashed = 0;
+        dispute.total_slashed = 0;
+        dispute.raised_at = now;
+        dispute.bump = ctx.bumps.dispute;
+
+        // Transfer bond: disputer → dispute PDA (locked until resolution)
+        let cpi_ctx = CpiContext::new(
+            ctx.accounts.system_program.to_account_info(),
+            system_program::Transfer {
+                from: ctx.accounts.disputer.to_account_info(),
+                to: ctx.accounts.dispute.to_account_info(),
+            },
+        );
+        system_program::transfer(cpi_ctx, bond_amount)?;
+
+        // Flip asset to Disputed — vault gate fires automatically (status != Verified)
+        ctx.accounts.asset.status = AssetStatus::Disputed;
+
+        emit!(DisputeRaised {
+            dispute: ctx.accounts.dispute.key(),
+            asset: ctx.accounts.asset.key(),
+            disputer: ctx.accounts.disputer.key(),
+            bond_amount,
+            timestamp: now,
+        });
+
+        Ok(())
+    }
+
+    /// Admin resolver upholds or dismisses the dispute.
+    /// Upheld  → asset stays Disputed; slash_agent can now be called per attester.
+    /// Dismissed → asset reverts to Verified; interest resumes immediately.
+    /// v1: single trusted authority. Bond + slashed SOL distribution is Phase 3 Step 2.
+    pub fn resolve_dispute(ctx: Context<ResolveDispute>, upheld: bool) -> Result<()> {
+        require!(
+            ctx.accounts.dispute.status == DisputeStatus::Active,
+            DisputeError::DisputeNotActive
+        );
+
+        let now = Clock::get()?.unix_timestamp;
+
+        if upheld {
+            ctx.accounts.dispute.status = DisputeStatus::Upheld;
+            // Asset remains Disputed — vault interest stays blocked until Phase 3 Step 2
+            // handles aftermath (new valid attestations or asset retirement).
+        } else {
+            ctx.accounts.dispute.status = DisputeStatus::Dismissed;
+            // Revert to Verified — vault interest gate clears automatically
+            ctx.accounts.asset.status = AssetStatus::Verified;
+        }
+
+        emit!(DisputeResolved {
+            dispute: ctx.accounts.dispute.key(),
+            asset: ctx.accounts.asset.key(),
+            upheld,
+            timestamp: now,
+        });
+
+        Ok(())
+    }
+
+    /// Slash one attesting agent after a dispute is Upheld.
+    /// Anyone can crank this — the SlashRecord PDA (via init) prevents double-execution.
+    ///
+    /// Slash amount: 50% of the agent's current stake (floor: 0 if already exhausted).
+    ///
+    /// Slash-evasion invariant: active_attestation_count can only reach 0 through
+    /// slashing. An agent who ever attested an asset cannot unregister until they've
+    /// been slashed in every upheld dispute against those assets. This is intentional:
+    /// decrementing active_attestation_count via any other path re-opens stake withdrawal.
+    pub fn slash_agent(ctx: Context<SlashAgent>) -> Result<()> {
+        require!(
+            ctx.accounts.dispute.status == DisputeStatus::Upheld,
+            DisputeError::DisputeNotUpheld
+        );
+        require!(
+            ctx.accounts.agent.stake_amount > 0,
+            DisputeError::AgentStakeExhausted
+        );
+
+        let now = Clock::get()?.unix_timestamp;
+
+        let slash_amount = ctx.accounts.agent.stake_amount / 2;
+
+        // Record the slash (prevents double-slashing in the same dispute)
+        let slash_record = &mut ctx.accounts.slash_record;
+        slash_record.dispute = ctx.accounts.dispute.key();
+        slash_record.agent = ctx.accounts.agent.key();
+        slash_record.slash_amount = slash_amount;
+        slash_record.bump = ctx.bumps.slash_record;
+
+        // Move lamports: Agent PDA → Dispute PDA
+        // Agent PDA is owned by this program, so direct lamport manipulation is valid.
+        **ctx.accounts.agent.to_account_info().try_borrow_mut_lamports()? -= slash_amount;
+        **ctx.accounts.dispute.to_account_info().try_borrow_mut_lamports()? += slash_amount;
+
+        // Reduce stored stake amount
+        ctx.accounts.agent.stake_amount = ctx.accounts.agent.stake_amount
+            .checked_sub(slash_amount)
+            .ok_or(AttestationError::ArithmeticOverflow)?;
+
+        // Decrement active count — the slash terminates this attestation commitment.
+        // This is the ONLY place active_attestation_count decrements; see invariant note above.
+        ctx.accounts.agent.active_attestation_count = ctx.accounts.agent.active_attestation_count
+            .checked_sub(1)
+            .ok_or(AttestationError::ArithmeticOverflow)?;
+
+        // Accumulate dispute totals
+        ctx.accounts.dispute.total_slashed = ctx.accounts.dispute.total_slashed
+            .checked_add(slash_amount)
+            .ok_or(AttestationError::ArithmeticOverflow)?;
+        ctx.accounts.dispute.agents_slashed = ctx.accounts.dispute.agents_slashed
+            .checked_add(1)
+            .ok_or(AttestationError::ArithmeticOverflow)?;
+
+        let remaining_stake = ctx.accounts.agent.stake_amount;
+
+        emit!(AgentSlashed {
+            dispute: ctx.accounts.dispute.key(),
+            agent: ctx.accounts.agent.key(),
+            slash_amount,
+            remaining_stake,
             timestamp: now,
         });
 

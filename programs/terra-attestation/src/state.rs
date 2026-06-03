@@ -60,6 +60,57 @@ pub struct Attestation {
     pub bump: u8,
 }
 
+// ─── Dispute Enums ────────────────────────────────────────────────────────────
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Debug)]
+pub enum DisputeStatus {
+    Active,
+    Upheld,
+    Dismissed,
+}
+
+// ─── Dispute Account Structs ──────────────────────────────────────────────────
+
+/// Singleton storing the admin who can resolve disputes.
+/// v1: single trusted authority (centrally adjudicated).
+/// Future: replace authority with a multisig or on-chain governance key.
+/// Initialized once — init constraint prevents re-initialization.
+#[account]
+pub struct DisputeResolver {
+    pub authority: Pubkey, // Admin who can call resolve_dispute
+    pub bump: u8,
+}
+
+/// An active or resolved dispute against an attested asset.
+/// PDA keyed by (asset, disputer) — one dispute per (asset, disputer) pair.
+///
+/// Bond mechanics (v1 spine):
+///   - Upheld:   bond stays locked in this PDA (returned to disputer in Phase 3 Step 2)
+///   - Dismissed: bond stays locked in this PDA (sent to treasury in Phase 3 Step 2)
+/// Slashed SOL from agents also accumulates here after slash_agent calls.
+#[account]
+pub struct Dispute {
+    pub asset: Pubkey,           // Which asset is disputed (PDA seed)
+    pub disputer: Pubkey,        // Who raised the dispute (PDA seed)
+    pub evidence_hash: [u8; 32], // hash of disputer's counter-evidence package
+    pub bond_amount: u64,        // SOL posted by disputer (locked in this PDA)
+    pub status: DisputeStatus,   // Active | Upheld | Dismissed
+    pub agents_slashed: u8,      // Running count of agents slashed
+    pub total_slashed: u64,      // Total lamports extracted from agents
+    pub raised_at: i64,
+    pub bump: u8,
+}
+
+/// Created by slash_agent to prevent the same agent from being slashed twice
+/// in the same dispute. init constraint is the enforcement mechanism.
+#[account]
+pub struct SlashRecord {
+    pub dispute: Pubkey,   // Which dispute triggered this slash
+    pub agent: Pubkey,     // Which agent was slashed
+    pub slash_amount: u64, // Lamports extracted
+    pub bump: u8,
+}
+
 // ─── Space Constants ─────────────────────────────────────────────────────────
 
 // 8 discriminator + 32 authority + 8 stake + 8 reputation + 4 active_count + 8 registered_at + 1 bump
@@ -71,6 +122,16 @@ pub const ASSET_SIZE: usize = 8 + 32 + 1 + 8 + 32 + 32 + 1 + 1 + 1 + 33 + 8 + 1;
 
 // 8 + 32 asset + 32 agent + 32 data_hash + 8 attested_at + 1 bump
 pub const ATTESTATION_SIZE: usize = 8 + 32 + 32 + 32 + 8 + 1;
+
+// 8 + 32 authority + 1 bump
+pub const DISPUTE_RESOLVER_SIZE: usize = 8 + 32 + 1;
+
+// 8 + 32 asset + 32 disputer + 32 evidence_hash + 8 bond_amount + 1 status
+// + 1 agents_slashed + 8 total_slashed + 8 raised_at + 1 bump
+pub const DISPUTE_SIZE: usize = 8 + 32 + 32 + 32 + 8 + 1 + 1 + 8 + 8 + 1;
+
+// 8 + 32 dispute + 32 agent + 8 slash_amount + 1 bump
+pub const SLASH_RECORD_SIZE: usize = 8 + 32 + 32 + 8 + 1;
 
 // ─── Accounts Contexts ────────────────────────────────────────────────────────
 
@@ -172,4 +233,125 @@ pub struct LinkVault<'info> {
         constraint = asset.authority == authority.key() @ crate::AttestationError::Unauthorized
     )]
     pub asset: Account<'info, Asset>,
+}
+
+// ─── Dispute Accounts Contexts ────────────────────────────────────────────────
+
+/// One-time setup: creates the singleton admin resolver.
+/// Whoever calls this first becomes the resolver — deployer should call immediately.
+/// init prevents any future re-initialization.
+#[derive(Accounts)]
+pub struct InitializeResolver<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        init,
+        payer = authority,
+        space = DISPUTE_RESOLVER_SIZE,
+        seeds = [b"resolver"],
+        bump
+    )]
+    pub dispute_resolver: Account<'info, DisputeResolver>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct RaiseDispute<'info> {
+    #[account(mut)]
+    pub disputer: Signer<'info>,
+
+    /// Only Verified assets can be disputed.
+    /// Constraint checked in instruction body to give a clean error code.
+    #[account(
+        mut,
+        seeds = [b"asset", asset.authority.as_ref(), asset.data_hash.as_ref()],
+        bump = asset.bump
+    )]
+    pub asset: Account<'info, Asset>,
+
+    /// One dispute per (asset, disputer) pair. init prevents duplicate disputes.
+    #[account(
+        init,
+        payer = disputer,
+        space = DISPUTE_SIZE,
+        seeds = [b"dispute", asset.key().as_ref(), disputer.key().as_ref()],
+        bump
+    )]
+    pub dispute: Account<'info, Dispute>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct ResolveDispute<'info> {
+    /// Must be the registered admin resolver
+    pub resolver: Signer<'info>,
+
+    #[account(
+        seeds = [b"resolver"],
+        bump = dispute_resolver.bump,
+        constraint = dispute_resolver.authority == resolver.key() @ crate::DisputeError::ResolverOnly
+    )]
+    pub dispute_resolver: Account<'info, DisputeResolver>,
+
+    #[account(
+        mut,
+        seeds = [b"dispute", dispute.asset.as_ref(), dispute.disputer.as_ref()],
+        bump = dispute.bump
+    )]
+    pub dispute: Account<'info, Dispute>,
+
+    /// Asset whose status changes on resolution.
+    /// Key equality to dispute.asset verified via constraint (seeds include data_hash
+    /// which the resolver fetches from the existing account before calling).
+    #[account(
+        mut,
+        constraint = asset.key() == dispute.asset @ crate::DisputeError::AssetMismatch
+    )]
+    pub asset: Account<'info, Asset>,
+}
+
+#[derive(Accounts)]
+pub struct SlashAgent<'info> {
+    /// Anyone can crank this after a dispute is Upheld.
+    /// Payer covers the SlashRecord rent (small, ~0.001 SOL).
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"dispute", dispute.asset.as_ref(), dispute.disputer.as_ref()],
+        bump = dispute.bump
+    )]
+    pub dispute: Account<'info, Dispute>,
+
+    /// The agent being slashed
+    #[account(
+        mut,
+        seeds = [b"agent", agent.authority.as_ref()],
+        bump = agent.bump
+    )]
+    pub agent: Account<'info, Agent>,
+
+    /// Proves this agent actually attested the disputed asset.
+    /// If this PDA doesn't exist, init below fails — no slashing unrelated agents.
+    #[account(
+        seeds = [b"attestation", dispute.asset.as_ref(), agent.authority.as_ref()],
+        bump = attestation.bump
+    )]
+    pub attestation: Account<'info, Attestation>,
+
+    /// Created here to prevent double-slashing the same agent in the same dispute.
+    #[account(
+        init,
+        payer = payer,
+        space = SLASH_RECORD_SIZE,
+        seeds = [b"slash", dispute.key().as_ref(), agent.key().as_ref()],
+        bump
+    )]
+    pub slash_record: Account<'info, SlashRecord>,
+
+    pub system_program: Program<'info, System>,
 }
