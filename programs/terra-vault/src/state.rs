@@ -8,9 +8,8 @@ pub struct Vault {
     pub daily_interest_rate: u64,
     pub last_interest_accrual: i64,
     pub bump: u8,
-    /// Set by set_asset_gate. When Some, accrue_interest requires the referenced
-    /// terra-attestation Asset account to have status == Verified.
-    /// None means the vault accrues interest unconditionally (no gate).
+    /// When Some, accrue_interest requires the Asset to be Verified and linked back
+    /// to this vault (bidirectional). set_asset_gate sets this; remove_asset_gate clears it.
     pub linked_asset: Option<Pubkey>,
 }
 
@@ -19,7 +18,7 @@ pub struct VaultDeposit {
     pub vault: Pubkey,
     pub depositor: Pubkey,
     pub amount_deposited: u64,
-    pub interest_earned: u64,
+    pub interest_earned: u64, // cumulative interest paid out to this depositor
     pub deposit_timestamp: i64,
     pub bump: u8,
 }
@@ -104,10 +103,9 @@ pub struct AccrueInterest<'info> {
     pub vault: Account<'info, Vault>,
 
     /// Pass the terra-attestation Asset PDA when vault.linked_asset is Some.
-    /// Pass any pubkey (e.g. vault key itself) when vault has no gate — it is ignored.
+    /// Pass any pubkey (e.g. vault key) when vault has no gate — ignored by program.
     /// CHECK: Key verified against vault.linked_asset; owner verified against
     ///        TERRA_ATTESTATION_ID; status byte read at ASSET_STATUS_OFFSET.
-    ///        Only validated when vault.linked_asset is Some.
     pub asset: UncheckedAccount<'info>,
 }
 
@@ -123,8 +121,42 @@ pub struct SetAssetGate<'info> {
     )]
     pub vault: Account<'info, Vault>,
 
-    /// The terra-attestation Asset account to use as an interest gate.
-    /// CHECK: Owner verified against TERRA_ATTESTATION_ID in instruction logic.
-    ///        Status byte verified as Verified (1) before storing the pubkey.
+    /// The terra-attestation Asset to gate this vault.
+    /// CHECK: Owner verified; status == Verified; asset.linked_vault == vault.key()
+    ///        (bidirectional check — prevents gating on assets that never linked back).
     pub asset: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct RemoveAssetGate<'info> {
+    pub authority: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"vault", authority.key().as_ref()],
+        bump = vault.bump,
+        constraint = vault.authority == authority.key() @ crate::VaultError::Unauthorized
+    )]
+    pub vault: Account<'info, Vault>,
+
+    /// The currently linked Asset — must be Disputed to allow gate removal.
+    /// CHECK: Key verified against vault.linked_asset; owner and status bytes verified
+    ///        in instruction. Gate removal only allowed when asset is Disputed.
+    pub current_asset: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct FundVaultInterest<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"vault", authority.key().as_ref()],
+        bump = vault.bump,
+        constraint = vault.authority == authority.key() @ crate::VaultError::Unauthorized
+    )]
+    pub vault: Account<'info, Vault>,
+
+    pub system_program: Program<'info, System>,
 }

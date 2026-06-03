@@ -163,6 +163,9 @@ describe("TERRA Phase 3 — Dispute & Slashing (Bankrun)", () => {
     const assetState = await attest.account.asset.fetch(asset);
     assert.deepEqual(assetState.status, { verified: {} });
 
+    // Bidirectional link: asset.linked_vault must point to the vault before set_asset_gate
+    await attest.methods.linkVault(v).accounts({ authority, asset }).rpc();
+
     // Set vault interest gate
     await vault.methods.setAssetGate()
       .accounts({ authority, vault: v, asset })
@@ -485,6 +488,20 @@ describe("TERRA Phase 3 — Dispute & Slashing (Bankrun)", () => {
     const assetAfter = await attest.account.asset.fetch(asset2);
     assert.deepEqual(assetAfter.status, { verified: {} });
     console.log("  Dismissed dispute: asset back to Verified ✓");
+
+    // Vault still has linked_asset = Some(main asset) which is Disputed.
+    // Remove the broken gate (only allowed because main asset is Disputed).
+    const mainAsset = assetPda(authority, ASSET_HASH);
+    await vault.methods.removeAssetGate()
+      .accounts({ authority, vault: v, currentAsset: mainAsset })
+      .rpc();
+
+    const vaultAfterRemove = await vault.account.vault.fetch(v);
+    assert.isNull(vaultAfterRemove.linkedAsset);
+    console.log("  Broken gate removed (main asset is Disputed) ✓");
+
+    // Bidirectional link: asset2 must point back to vault before set_asset_gate
+    await attest.methods.linkVault(v).accounts({ authority, asset: asset2 }).rpc();
 
     // Wire vault gate to asset2 and confirm interest can accrue again
     await vault.methods.setAssetGate()

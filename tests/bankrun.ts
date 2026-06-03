@@ -286,7 +286,14 @@ describe("TERRA Vault - Attestation Gate (cross-program, Bankrun)", () => {
 
     const assetState = await attestProgram.account.asset.fetch(asset);
     assert.deepEqual(assetState.status, { verified: {} });
-    console.log(`  Asset status: Verified (3/3 attestations)`);
+
+    // link_vault sets asset.linked_vault = Some(vault) — required for bidirectional gate check
+    await attestProgram.methods
+      .linkVault(vault)
+      .accounts({ authority, asset })
+      .rpc();
+
+    console.log(`  Asset status: Verified (3/3 attestations), linked_vault set`);
     console.log(`  Vault: ${vault.toString()}`);
     console.log(`  Asset: ${asset.toString()}`);
   });

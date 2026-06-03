@@ -1,26 +1,34 @@
 # TERRA — Verifiable Asset Tokenization Protocol
 
-## Complete Co-Founder Knowledge Base v1.0
+## Complete Co-Founder Knowledge Base v2.0
 
-**Builder:** KingFaitho | **Status:** Phase 1, Step 2 (Testing & Devnet Deployment) | **Last Updated:** May 26, 2026
+**Builder:** KingFaitho | **Status:** Phase 3 complete — 44/44 tests passing | **Last Updated:** June 3, 2026
 
 -----
 
 ## EXECUTIVE SUMMARY (Read This First)
 
 **What We’re Building:**
-A precision financial infrastructure for African Real-World Assets (RWAs) on Solana. Farmers tokenize crops/land, investors buy tranches, AI models verify yields, everything settles with zero floating-point errors.
+A precision financial infrastructure for African Real-World Assets (RWAs) on Solana. Farmers tokenize crops/land, investors deposit SOL and earn verified yield, local agents attest harvests, disputes slash fraudulent attestors.
 
-**Current State:**
+**Current State (June 2026):**
 
-- ✅ 3 Solana programs compiled (terra-vault, attestation, marketplace)
-- ✅ Core vault logic: initialize, deposit, withdraw, accrue_interest
-- ✅ Precision math library (integer-only, no floats)
-- ✅ GitHub live (Commit: bb2e07f)
-- ⏳ Tests being written (TODAY)
-- ⏳ Devnet deployment (TODAY)
+- ✅ terra-vault: deposit, withdraw (principal + pro-rata interest), accrue_interest (precision math), fund_vault_interest, set_asset_gate, remove_asset_gate
+- ✅ terra-attestation: agent registration (Sybil-resistant staking), asset registration (content-addressed), 3-of-N attestation quorum, attestation-gated vault linking
+- ✅ Dispute & Slashing: raise_dispute (bond), resolve_dispute (admin resolver), slash_agent (50% stake, SlashRecord anti-double-slash)
+- ✅ Cross-program gate: vault.accrue_interest reads terra-attestation Asset status byte; Disputed = interest blocked automatically
+- ✅ Vault recovery: remove_asset_gate (only when Disputed), re-gate to new Verified asset
+- ✅ Bidirectional link: asset.linked_vault must == vault.key() before set_asset_gate succeeds
+- ✅ Full economic loop proven: fund_vault_interest → accrue → withdraw with real SOL interest paid
+- ✅ 44/44 tests passing (integration + bankrun + attestation + dispute + interest_payout)
+- ⏳ Phase 3 Step 2: dispute reward distribution (bond + slashed SOL → treasury/disputer)
+- ⏳ Phase 4: React frontend + Privy login
 
-**Timeline:** 18 months to mainnet | **Funding:** Bootstrapping | **Team:** You + Me (Claude) | **Scope:** Unlimited (quality > speed)
+**Programs:**
+- terra-vault: `5t7Smc2Q4ik9NrR2pr4UhaqPqA1kze1PKwhoFXWBm533`
+- terra-attestation: `DdzuR1Y9Nmen9XeEC27UJmHeV2oMZhfNLBYww7RBH3Ah`
+
+**Timeline:** 18 months to mainnet | **Funding:** Bootstrapping | **Team:** KingFaitho + Claude | **Scope:** Unlimited (quality > speed)
 
 -----
 
