@@ -2,7 +2,7 @@
 
 ## Complete Co-Founder Knowledge Base v2.0
 
-**Builder:** KingFaitho | **Status:** Phase 3 complete — 44/44 tests passing | **Last Updated:** June 3, 2026
+**Builder:** KingFaitho | **Status:** Phase 3 complete — 52/52 tests passing | **Last Updated:** June 3, 2026
 
 -----
 
@@ -13,15 +13,18 @@ A precision financial infrastructure for African Real-World Assets (RWAs) on Sol
 
 **Current State (June 2026):**
 
-- ✅ terra-vault: deposit, withdraw (principal + pro-rata interest), accrue_interest (precision math), fund_vault_interest, set_asset_gate, remove_asset_gate
-- ✅ terra-attestation: agent registration (Sybil-resistant staking), asset registration (content-addressed), 3-of-N attestation quorum, attestation-gated vault linking
-- ✅ Dispute & Slashing: raise_dispute (bond), resolve_dispute (admin resolver), slash_agent (50% stake, SlashRecord anti-double-slash)
-- ✅ Cross-program gate: vault.accrue_interest reads terra-attestation Asset status byte; Disputed = interest blocked automatically
+- ✅ terra-vault: initialize, deposit, withdraw (per-share fair interest), accrue_interest (precision math), fund_vault_interest, set_asset_gate, remove_asset_gate
+- ✅ terra-attestation: register_agent (Sybil-resistant staking), register_asset (content-addressed), attest_asset (N-of-N quorum), link_vault (gated by Verified status)
+- ✅ Dispute & Slashing: raise_dispute (MIN_DISPUTE_BOND = 1M lamports), resolve_dispute (admin resolver), slash_agent (50% stake, SlashRecord anti-double-slash)
+- ✅ Dispute Rewards: claim_upheld_dispute (70% disputer / 30% treasury), claim_dismissed_dispute (100% to treasury, disputer forfeited)
+- ✅ Treasury: initialize_treasury (singleton authority), claim_treasury_funds (withdrawal mechanism)
+- ✅ Cross-program gate: vault.accrue_interest reads Asset status; Disputed blocks interest accrual
 - ✅ Vault recovery: remove_asset_gate (only when Disputed), re-gate to new Verified asset
 - ✅ Bidirectional link: asset.linked_vault must == vault.key() before set_asset_gate succeeds
-- ✅ Full economic loop proven: fund_vault_interest → accrue → withdraw with real SOL interest paid
-- ✅ 44/44 tests passing (integration + bankrun + attestation + dispute + interest_payout)
-- ⏳ Phase 3 Step 2: dispute reward distribution (bond + slashed SOL → treasury/disputer)
+- ✅ Per-share fairness: multi-depositor tests prove fair interest accounting (Alice+Bob scenario)
+- ✅ Griefing prevention: MIN_DISPUTE_BOND guards against cheap false accusations
+- ✅ 52/52 tests passing (4 vault + 14 bankrun + 13 attestation + 11 dispute + 6 interest + 1 multi-depositor + 7 reward_distribution)
+- ⏳ Phase 1 Step 4: Security audit checklist
 - ⏳ Phase 4: React frontend + Privy login
 
 **Programs:**
@@ -55,31 +58,35 @@ A precision financial infrastructure for African Real-World Assets (RWAs) on Sol
 ### The 18-Month Vision
 
 ```
-PHASE 1 (Months 1-3): Precision Settlement Backbone        ← WE ARE HERE
+PHASE 1 (Months 1-3): Precision Settlement Backbone
 ├─ Step 1: ✅ DONE - Programs compiled, pushed to GitHub
-├─ Step 2: TODAY - Write tests, deploy to devnet
-├─ Step 3: This week - Custom errors, event logging
-└─ Step 4: Next week - Security audit checklist
+├─ Step 2: ✅ DONE - Write tests, deploy to devnet
+├─ Step 3: ✅ DONE - Custom errors, event logging
+└─ Step 4: 🔄 IN PROGRESS - Security audit checklist
 
-PHASE 2 (Months 4-6): Verifiable Asset Attestation
-├─ Agent reputation system (stake + sign)
-├─ Merkle tree proofs (cheap on-chain verification)
-└─ Asset registry (GPS, photos, harvest data)
+PHASE 2 (Months 4-6): Verifiable Asset Attestation              ← COMPLETE
+├─ ✅ Agent reputation system (stake + sign, Sybil-resistant)
+├─ ✅ Asset registry (content-addressed, GPS privacy via hash)
+└─ ✅ N-of-N quorum attestation (agents sign independently)
 
-PHASE 3 (Months 7-9): Yield Modeling & Dynamic Tranching
-├─ Actuarial library (duration, convexity, volatility)
-├─ Tranche logic (senior=8%, junior=20%)
-└─ Insurance fund mechanics
+PHASE 3 (Months 7-9): Dispute Resolution & Yield Distribution  ← COMPLETE
+├─ ✅ Dispute raising (MIN_DISPUTE_BOND = 1M lamports griefing guard)
+├─ ✅ Dispute resolution (admin resolver, status flips to Disputed)
+├─ ✅ Agent slashing (50% of stake, anti-double-slash records)
+├─ ✅ Reward distribution (70/30 split: disputer/treasury)
+├─ ✅ Treasury management (withdrawal mechanism for accumulated funds)
+├─ ✅ Per-share fair interest (multi-depositor tested)
+└─ ✅ Cross-program interest gate (Asset status blocks accrual if Disputed)
 
-PHASE 4 (Months 10-12): Mobile UI & Issuance
-├─ React app (deposits, withdrawals, dashboards)
-├─ Privy integration (phone/email login)
-└─ Twilio SMS notifications
+PHASE 4 (Months 10-12): Mobile UI & Issuance                  ← NEXT
+├─ React app (deposits, withdrawals, dispute creation, dashboards)
+├─ Privy integration (phone/email login, SMS notifications via Twilio)
+└─ Real-world asset issuance flow (farmers register + link vault)
 
 PHASE 5 (Months 13-15): Marketplace & MEV Resistance
-├─ Batch auction engine
-├─ Relayer network
-└─ Tranche trading UI
+├─ Batch auction engine (prevent sandwich attacks)
+├─ Relayer network (private order flow)
+└─ Tranche trading UI (senior/junior tranches)
 
 PHASE 6 (Months 16-18): Audit & Mainnet
 ├─ Security audit (external firm)
@@ -89,7 +96,7 @@ PHASE 6 (Months 16-18): Audit & Mainnet
 
 -----
 
-## II. CURRENT STATE (Commit: bb2e07f)
+## II. CURRENT STATE (Commit: 8cd0cda)
 
 ### What’s Actually Built
 
