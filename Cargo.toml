@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "programs/terra-vault",
+    "programs/terra-attestation",
     "indexer"
 ]
 resolver = "2"

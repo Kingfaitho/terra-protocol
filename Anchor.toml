@@ -6,13 +6,15 @@ skip-lint = false
 
 [programs.localnet]
 terra_vault = "5t7Smc2Q4ik9NrR2pr4UhaqPqA1kze1PKwhoFXWBm533"
+terra_attestation = "DdzuR1Y9Nmen9XeEC27UJmHeV2oMZhfNLBYww7RBH3Ah"
 
 [programs.devnet]
 terra_vault = "5t7Smc2Q4ik9NrR2pr4UhaqPqA1kze1PKwhoFXWBm533"
+terra_attestation = "DdzuR1Y9Nmen9XeEC27UJmHeV2oMZhfNLBYww7RBH3Ah"
 
 [provider]
 cluster = "localnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
-test = "npx ts-mocha -p ./tsconfig.json -t 1000000 tests/integration.ts tests/bankrun.ts"
+test = "npx ts-mocha -p ./tsconfig.json -t 1000000 tests/integration.ts tests/bankrun.ts tests/attestation.ts"
