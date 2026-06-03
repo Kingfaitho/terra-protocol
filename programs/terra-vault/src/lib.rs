@@ -123,10 +123,13 @@ pub mod terra_vault {
         vault.last_interest_accrual = Clock::get()?.unix_timestamp;
         vault.bump = ctx.bumps.vault;
         vault.linked_asset = None;
+        vault.interest_per_share = 0; // Starts at 0, incremented by accrue_interest
         Ok(())
     }
 
     /// Deposit SOL. Creates a VaultDeposit record and transfers lamports to vault PDA.
+    /// Issues shares equal to the deposit amount (1:1 share-to-lamport ratio).
+    /// Records the current interest_per_share as a debt snapshot.
     pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
         require!(amount > 0, VaultError::InvalidDepositAmount);
 
@@ -139,6 +142,10 @@ pub mod terra_vault {
         vault_deposit.interest_earned = 0;
         vault_deposit.deposit_timestamp = now;
         vault_deposit.bump = ctx.bumps.vault_deposit;
+        // Issue shares 1:1 with deposit amount
+        vault_deposit.shares_issued = amount;
+        // Record current interest_per_share as debt (no prior interest owed)
+        vault_deposit.interest_debt = ctx.accounts.vault.interest_per_share;
 
         ctx.accounts.vault.total_deposits = ctx.accounts.vault.total_deposits
             .checked_add(amount)
@@ -163,12 +170,12 @@ pub mod terra_vault {
         Ok(())
     }
 
-    /// Withdraw principal + pro-rata interest from the vault.
+    /// Withdraw principal + fair interest from the vault.
     ///
-    /// Interest payout: depositor receives their fraction of total_accrued_interest,
-    /// proportional to the lamports being withdrawn vs. vault total_deposits.
+    /// Interest payout (per-share accumulator):
+    /// interest = (current_interest_per_share - interest_debt) * shares_issued / 1e9
+    /// This ensures each depositor only earns interest accrued AFTER their deposit.
     /// Capped at available excess lamports (vault balance beyond rent + principal).
-    /// Interest can only be paid if vault authority has called fund_vault_interest.
     pub fn withdraw(ctx: Context<Withdraw>, amount: u64) -> Result<()> {
         require!(amount > 0, VaultError::InvalidDepositAmount);
         require!(
@@ -178,16 +185,17 @@ pub mod terra_vault {
 
         let now = Clock::get()?.unix_timestamp;
 
-        // ── Interest calculation ────────────────────────────────────────────
-        // Fraction = amount / total_deposits (use u128 to avoid overflow)
-        let interest_entitled = if ctx.accounts.vault.total_deposits > 0 {
-            (amount as u128)
-                .saturating_mul(ctx.accounts.vault.total_accrued_interest as u128)
-                .checked_div(ctx.accounts.vault.total_deposits as u128)
-                .unwrap_or(0) as u64
-        } else {
-            0
-        };
+        // ── Interest calculation (per-share accumulator) ─────────────────────
+        // interest_entitled = (current_ips - debt_ips) * shares / 1e9
+        let current_ips = ctx.accounts.vault.interest_per_share;
+        let debt_ips = ctx.accounts.vault_deposit.interest_debt;
+        let shares = ctx.accounts.vault_deposit.shares_issued as u128;
+
+        let ips_delta = current_ips.saturating_sub(debt_ips);
+        let interest_entitled = (ips_delta as u128)
+            .saturating_mul(shares)
+            .checked_div(1_000_000_000u128)
+            .unwrap_or(0) as u64;
 
         // Available interest = vault lamports beyond rent + remaining principal
         let rent = Rent::get()?;
@@ -268,6 +276,16 @@ pub mod terra_vault {
         vault.total_accrued_interest = vault.total_accrued_interest
             .checked_add(daily_interest)
             .ok_or(VaultError::ArithmeticOverflow)?;
+
+        // Update per-share accumulator: interest_per_share += (daily_interest * 1e9) / total_deposits
+        if vault.total_deposits > 0 {
+            let ips_increment = ((daily_interest as u128) * 1_000_000_000u128)
+                .checked_div(vault.total_deposits as u128)
+                .ok_or(VaultError::ArithmeticOverflow)?;
+            vault.interest_per_share = vault.interest_per_share
+                .checked_add(ips_increment)
+                .ok_or(VaultError::ArithmeticOverflow)?;
+        }
 
         vault.last_interest_accrual = clock.unix_timestamp;
 

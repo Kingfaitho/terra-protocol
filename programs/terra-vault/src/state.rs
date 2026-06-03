@@ -11,6 +11,10 @@ pub struct Vault {
     /// When Some, accrue_interest requires the Asset to be Verified and linked back
     /// to this vault (bidirectional). set_asset_gate sets this; remove_asset_gate clears it.
     pub linked_asset: Option<Pubkey>,
+    /// Accumulated interest per share (u128 scaled by 1e9 for precision).
+    /// Updated in accrue_interest. Used to calculate fair interest for each depositor.
+    /// Starts at 0. Incremented as: interest_per_share += (daily_interest * 1e9) / total_deposits
+    pub interest_per_share: u128,
 }
 
 #[account]
@@ -21,16 +25,23 @@ pub struct VaultDeposit {
     pub interest_earned: u64, // cumulative interest paid out to this depositor
     pub deposit_timestamp: i64,
     pub bump: u8,
+    /// Shares issued when this deposit was created (amount_deposited / share_price at time of deposit).
+    /// Used with interest_per_share to calculate fair interest:
+    /// interest = (current_interest_per_share - interest_debt) * shares_issued / 1e9
+    pub shares_issued: u64,
+    /// Interest debt snapshot at deposit time (interest_per_share when account was created).
+    /// Subtracted from current interest_per_share to avoid double-counting prior accruals.
+    pub interest_debt: u128,
 }
 
 // 8 discriminator + 32 authority + 8 total_deposits + 8 total_accrued_interest
 // + 8 daily_interest_rate + 8 last_interest_accrual + 1 bump
-// + 33 linked_asset (Option<Pubkey>: 1 discriminant + 32 pubkey) = 106
-pub const VAULT_SIZE: usize = 8 + 32 + 8 + 8 + 8 + 8 + 1 + 33;
+// + 33 linked_asset (Option<Pubkey>: 1 discriminant + 32 pubkey) + 16 interest_per_share = 122
+pub const VAULT_SIZE: usize = 8 + 32 + 8 + 8 + 8 + 8 + 1 + 33 + 16;
 
 // 8 discriminator + 32 vault + 32 depositor + 8 amount_deposited
-// + 8 interest_earned + 8 deposit_timestamp + 1 bump = 97
-pub const VAULT_DEPOSIT_SIZE: usize = 8 + 32 + 32 + 8 + 8 + 8 + 1;
+// + 8 interest_earned + 8 deposit_timestamp + 1 bump + 8 shares_issued + 16 interest_debt = 121
+pub const VAULT_DEPOSIT_SIZE: usize = 8 + 32 + 32 + 8 + 8 + 8 + 1 + 8 + 16;
 
 #[derive(Accounts)]
 pub struct InitializeVault<'info> {
