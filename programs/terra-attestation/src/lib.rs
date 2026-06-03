@@ -62,6 +62,9 @@ pub enum DisputeError {
 
     #[msg("Bond amount must be at least the minimum (1M lamports = 0.001 SOL)")]
     BondTooSmall = 6208,
+
+    #[msg("Only the treasury authority can withdraw treasury funds")]
+    TreasuryUnauthorized = 6209,
 }
 
 // ─── Events ───────────────────────────────────────────────────────────────────
@@ -153,6 +156,14 @@ pub struct DismissedBondForfeited {
 pub struct TreasuryInitialized {
     pub treasury: Pubkey,
     pub authority: Pubkey,
+    pub timestamp: i64,
+}
+
+#[event]
+pub struct TreasuryFundsWithdrawn {
+    pub treasury: Pubkey,
+    pub recipient: Pubkey,
+    pub amount: u64,
     pub timestamp: i64,
 }
 
@@ -569,6 +580,32 @@ pub mod terra_attestation {
         emit!(DismissedBondForfeited {
             dispute: dispute.key(),
             bond_amount: bond,
+            timestamp: now,
+        });
+
+        Ok(())
+    }
+
+    /// Withdraw funds from the treasury.
+    /// Only the treasury authority can call this.
+    /// Sends specified amount to the recipient (typically the authority itself).
+    pub fn claim_treasury_funds(ctx: Context<ClaimTreasuryFunds>, amount: u64) -> Result<()> {
+        let now = Clock::get()?.unix_timestamp;
+
+        let treasury_lamports = ctx.accounts.treasury.to_account_info().lamports();
+        require!(
+            amount <= treasury_lamports,
+            AttestationError::ArithmeticOverflow
+        );
+
+        // Transfer treasury funds to recipient
+        **ctx.accounts.treasury.to_account_info().try_borrow_mut_lamports()? -= amount;
+        **ctx.accounts.recipient.to_account_info().try_borrow_mut_lamports()? += amount;
+
+        emit!(TreasuryFundsWithdrawn {
+            treasury: ctx.accounts.treasury.key(),
+            recipient: ctx.accounts.recipient.key(),
+            amount,
             timestamp: now,
         });
 

@@ -433,3 +433,22 @@ pub struct InitializeTreasury<'info> {
 
     pub system_program: Program<'info, System>,
 }
+
+#[derive(Accounts)]
+pub struct ClaimTreasuryFunds<'info> {
+    /// Only the treasury authority can withdraw funds.
+    pub authority: Signer<'info>,
+
+    /// Treasury PDA holding the accumulated funds.
+    #[account(
+        mut,
+        seeds = [b"treasury"],
+        bump = treasury.bump,
+        constraint = treasury.authority == authority.key() @ crate::DisputeError::TreasuryUnauthorized
+    )]
+    pub treasury: Account<'info, Treasury>,
+
+    /// Recipient of the withdrawn funds (typically authority, but can delegate).
+    #[account(mut)]
+    pub recipient: SystemAccount<'info>,
+}

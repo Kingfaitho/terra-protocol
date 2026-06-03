@@ -34,7 +34,7 @@ describe("TERRA Phase 3 — Dispute & Slashing (Bankrun)", () => {
 
   const STAKE      = new anchor.BN(2_000_000); // 0.002 SOL — will be halved on slash
   const DEPOSIT    = new anchor.BN(1_000_000); // 0.001 SOL in vault
-  const BOND       = new anchor.BN(500_000);   // 0.0005 SOL dispute bond
+  const BOND       = new anchor.BN(1_000_000); // 0.001 SOL dispute bond (minimum required)
   const LOC_HASH   = Array(32).fill(5);
   const ASSET_HASH = Array(32).fill(6);
 

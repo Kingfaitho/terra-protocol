@@ -264,4 +264,67 @@ describe("TERRA Phase 3 Step 2 — Dispute Reward Distribution", () => {
       console.log("  Double-claim prevented (insufficient lamports in dispute PDA) ✓");
     }
   });
+
+  it("Treasury authority can withdraw accumulated funds", async () => {
+    const treasury = treasuryPda();
+    const treasuryBefore = Number(await context.banksClient.getBalance(treasury));
+
+    // Withdraw half of treasury balance
+    const withdrawAmount = new anchor.BN(Math.floor(treasuryBefore / 2));
+
+    const recipientBefore = Number(await context.banksClient.getBalance(authority));
+
+    await attest.methods.claimTreasuryFunds(withdrawAmount)
+      .accounts({
+        authority,
+        treasury,
+        recipient: authority,
+      })
+      .rpc();
+
+    const treasuryAfter = Number(await context.banksClient.getBalance(treasury));
+    const recipientAfter = Number(await context.banksClient.getBalance(authority));
+
+    // Treasury should decrease by exact withdrawal amount
+    assert.equal(
+      treasuryAfter,
+      treasuryBefore - withdrawAmount.toNumber(),
+      "Treasury balance should decrease by withdrawal amount"
+    );
+
+    // Recipient should gain approximately the withdrawal amount (minus transaction fee)
+    const recipientGain = recipientAfter - recipientBefore;
+    const expectedGain = withdrawAmount.toNumber();
+    const fee = expectedGain - recipientGain;
+    assert(
+      fee >= 0 && fee <= 100_000, // Transaction fee should be reasonable (< 0.0001 SOL)
+      `Recipient gain ${recipientGain} is not within reasonable fee range of ${expectedGain}`
+    );
+
+    console.log(`  Treasury withdrawal: ${withdrawAmount} lamports transferred ✓`);
+  });
+
+  it("Only treasury authority can withdraw funds", async () => {
+    const treasury = treasuryPda();
+    const withdrawAmount = new anchor.BN(1_000_000);
+
+    try {
+      await attest.methods.claimTreasuryFunds(withdrawAmount)
+        .accounts({
+          authority: disputerKp.publicKey, // Wrong authority
+          treasury,
+          recipient: disputerKp.publicKey,
+        })
+        .signers([disputerKp])
+        .rpc();
+      assert.fail("Should have rejected withdrawal from non-authority");
+    } catch (err: any) {
+      const errStr = err.toString();
+      assert(
+        errStr.includes("TreasuryUnauthorized") || errStr.includes("0x2fb1"),
+        `Expected TreasuryUnauthorized error, got: ${errStr}`
+      );
+      console.log("  Treasury authorization enforced (only authority can withdraw) ✓");
+    }
+  });
 });
