@@ -97,15 +97,16 @@ describe("TERRA Vault - Precision Settlement Engine", () => {
 
     // Vault was just initialized seconds ago — time_elapsed << 86400, so this must fail.
     try {
+      // asset = vaultPda as sentinel (no gate set; vault.linked_asset is None, it's ignored)
       await program.methods
         .accrueInterest()
-        .accounts({ vault: vaultPda })
+        .accounts({ vault: vaultPda, asset: vaultPda })
         .rpc();
       assert.fail("Expected AccrualTooSoon error but instruction succeeded");
     } catch (err: any) {
       // Anchor wraps program errors; confirm we got the right one.
       assert.include(
-        JSON.stringify(err),
+        err.toString(),
         "AccrualTooSoon",
         "Expected AccrualTooSoon error code"
       );

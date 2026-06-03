@@ -6,6 +6,22 @@ use state::*;
 
 declare_id!("5t7Smc2Q4ik9NrR2pr4UhaqPqA1kze1PKwhoFXWBm533");
 
+// ─── Cross-program constants ──────────────────────────────────────────────────
+
+/// terra-attestation program ID — used to verify ownership of Asset accounts.
+const TERRA_ATTESTATION_ID: &str = "DdzuR1Y9Nmen9XeEC27UJmHeV2oMZhfNLBYww7RBH3Ah";
+
+/// Byte offset of the status field inside a terra-attestation Asset account.
+/// Layout: 8 discriminator + 32 authority + 1 asset_type + 8 quantity
+///       + 32 location_hash + 32 data_hash + 1 attestation_count
+///       + 1 required_attestations = 115
+const ASSET_STATUS_OFFSET: usize = 115;
+
+/// Borsh enum index for AssetStatus::Verified (index 1 in the AssetStatus enum).
+const ASSET_STATUS_VERIFIED: u8 = 1;
+
+// ─── Errors ───────────────────────────────────────────────────────────────────
+
 #[error_code]
 pub enum VaultError {
     #[msg("Deposit amount must be greater than 0")]
@@ -22,7 +38,15 @@ pub enum VaultError {
 
     #[msg("Arithmetic overflow in vault calculation")]
     ArithmeticOverflow = 6004,
+
+    #[msg("Linked asset is not Verified — interest accrual blocked")]
+    AssetNotVerified = 6005,
+
+    #[msg("Provided asset account does not match the vault's linked asset")]
+    InvalidAssetAccount = 6006,
 }
+
+// ─── Events ───────────────────────────────────────────────────────────────────
 
 #[event]
 pub struct DepositMade {
@@ -47,12 +71,21 @@ pub struct InterestAccrued {
     pub timestamp: i64,
 }
 
+#[event]
+pub struct AssetGateSet {
+    pub vault: Pubkey,
+    pub asset: Pubkey,
+    pub timestamp: i64,
+}
+
+// ─── Program ─────────────────────────────────────────────────────────────────
+
 #[program]
 pub mod terra_vault {
     use super::*;
 
     /// Create a new vault. One vault per authority (PDA ensures uniqueness).
-    /// Starts with 8% APY (800 basis points), no deposits, no accrued interest.
+    /// Starts ungated (linked_asset = None) — use set_asset_gate to require attestation.
     pub fn initialize_vault(ctx: Context<InitializeVault>) -> Result<()> {
         let vault = &mut ctx.accounts.vault;
         vault.authority = ctx.accounts.authority.key();
@@ -62,6 +95,7 @@ pub mod terra_vault {
         vault.daily_interest_rate = 800;
         vault.last_interest_accrual = Clock::get()?.unix_timestamp;
         vault.bump = ctx.bumps.vault;
+        vault.linked_asset = None;
         Ok(())
     }
 
@@ -84,7 +118,6 @@ pub mod terra_vault {
             .checked_add(amount)
             .ok_or(VaultError::ArithmeticOverflow)?;
 
-        // Transfer SOL from depositor → vault PDA
         let cpi_ctx = CpiContext::new(
             ctx.accounts.system_program.to_account_info(),
             system_program::Transfer {
@@ -115,7 +148,6 @@ pub mod terra_vault {
 
         let now = Clock::get()?.unix_timestamp;
 
-        // checked_sub gives InsufficientBalance on underflow instead of a panic
         ctx.accounts.vault_deposit.amount_deposited = ctx.accounts.vault_deposit.amount_deposited
             .checked_sub(amount)
             .ok_or(VaultError::InsufficientBalance)?;
@@ -125,7 +157,6 @@ pub mod terra_vault {
             .ok_or(VaultError::InsufficientBalance)?;
 
         // PDAs can't sign for system_program::transfer, so move lamports directly.
-        // The vault is owned by this program, so we can reduce its lamports.
         **ctx.accounts.vault.to_account_info().try_borrow_mut_lamports()? -= amount;
         **ctx.accounts.depositor.to_account_info().try_borrow_mut_lamports()? += amount;
 
@@ -139,12 +170,11 @@ pub mod terra_vault {
         Ok(())
     }
 
-    /// Accrue daily interest on total vault deposits. May only be called once
-    /// per 24 hours. Uses integer-only math to avoid floating-point rounding:
-    /// interest = (total_deposits * daily_rate) / 36500 / 10000
+    /// Accrue daily interest on total vault deposits. May only be called once per 24 hours.
     ///
-    /// Overflow threshold: ~23 quadrillion lamports (~23M SOL) in a single vault.
-    /// checked_mul catches this and returns ArithmeticOverflow instead of a panic.
+    /// If vault.linked_asset is Some, the asset account must be passed and its status
+    /// must be Verified (byte 115 == 1). A Pending or Disputed asset blocks accrual —
+    /// yield only flows when the backing real-world asset is independently confirmed.
     pub fn accrue_interest(ctx: Context<AccrueInterest>) -> Result<()> {
         let vault = &mut ctx.accounts.vault;
         let clock = Clock::get()?;
@@ -152,9 +182,26 @@ pub mod terra_vault {
 
         require!(time_elapsed >= 86400, VaultError::AccrualTooSoon);
 
-        // Integer-only: multiply first to preserve precision before dividing.
-        // 36500 = days in a year * 100 (annualizes daily rate)
-        // 10000 = basis point denominator
+        // ── Attestation gate ─────────────────────────────────────────────────
+        // When vault.linked_asset is Some, the asset account is validated.
+        // When None, the asset account is accepted but ignored (sentinel pattern).
+        if let Some(linked_key) = vault.linked_asset {
+            let asset_info = &ctx.accounts.asset;
+
+            // The passed account must be the exact asset we stored
+            require!(asset_info.key() == linked_key, VaultError::InvalidAssetAccount);
+
+            // Verify account is owned by terra-attestation (prevents spoofed accounts)
+            let attestation_id: Pubkey = TERRA_ATTESTATION_ID.parse().unwrap();
+            require!(asset_info.owner == &attestation_id, VaultError::InvalidAssetAccount);
+
+            // Read the status byte at the known Borsh layout offset
+            let data = asset_info.try_borrow_data()?;
+            require!(data.len() > ASSET_STATUS_OFFSET, VaultError::InvalidAssetAccount);
+            require!(data[ASSET_STATUS_OFFSET] == ASSET_STATUS_VERIFIED, VaultError::AssetNotVerified);
+        }
+        // ─────────────────────────────────────────────────────────────────────
+
         let interest_numerator = vault.total_deposits
             .checked_mul(vault.daily_interest_rate)
             .ok_or(VaultError::ArithmeticOverflow)?;
@@ -170,6 +217,34 @@ pub mod terra_vault {
             vault: vault.key(),
             amount: daily_interest,
             timestamp: clock.unix_timestamp,
+        });
+
+        Ok(())
+    }
+
+    /// Link a Verified terra-attestation Asset as this vault's interest gate.
+    /// After this call, accrue_interest requires the asset to remain Verified.
+    /// Validates the asset is owned by terra-attestation and is currently Verified
+    /// before recording it — prevents setting a gate to an unverified asset.
+    pub fn set_asset_gate(ctx: Context<SetAssetGate>) -> Result<()> {
+        let asset_info = &ctx.accounts.asset;
+
+        // Verify account is owned by terra-attestation
+        let attestation_id: Pubkey = TERRA_ATTESTATION_ID.parse().unwrap();
+        require!(asset_info.owner == &attestation_id, VaultError::InvalidAssetAccount);
+
+        // Verify the asset is currently Verified
+        let data = asset_info.try_borrow_data()?;
+        require!(data.len() > ASSET_STATUS_OFFSET, VaultError::InvalidAssetAccount);
+        require!(data[ASSET_STATUS_OFFSET] == ASSET_STATUS_VERIFIED, VaultError::AssetNotVerified);
+
+        let asset_key = asset_info.key();
+        ctx.accounts.vault.linked_asset = Some(asset_key);
+
+        emit!(AssetGateSet {
+            vault: ctx.accounts.vault.key(),
+            asset: asset_key,
+            timestamp: Clock::get()?.unix_timestamp,
         });
 
         Ok(())
