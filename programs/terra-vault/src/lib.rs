@@ -19,6 +19,9 @@ pub enum VaultError {
 
     #[msg("Only the depositor can withdraw their funds")]
     Unauthorized = 6003,
+
+    #[msg("Arithmetic overflow in vault calculation")]
+    ArithmeticOverflow = 6004,
 }
 
 #[event]
@@ -67,15 +70,19 @@ pub mod terra_vault {
     pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
         require!(amount > 0, VaultError::InvalidDepositAmount);
 
+        let now = Clock::get()?.unix_timestamp;
+
         let vault_deposit = &mut ctx.accounts.vault_deposit;
         vault_deposit.vault = ctx.accounts.vault.key();
         vault_deposit.depositor = ctx.accounts.depositor.key();
         vault_deposit.amount_deposited = amount;
         vault_deposit.interest_earned = 0;
-        vault_deposit.deposit_timestamp = Clock::get()?.unix_timestamp;
+        vault_deposit.deposit_timestamp = now;
         vault_deposit.bump = ctx.bumps.vault_deposit;
 
-        ctx.accounts.vault.total_deposits += amount;
+        ctx.accounts.vault.total_deposits = ctx.accounts.vault.total_deposits
+            .checked_add(amount)
+            .ok_or(VaultError::ArithmeticOverflow)?;
 
         // Transfer SOL from depositor → vault PDA
         let cpi_ctx = CpiContext::new(
@@ -91,7 +98,7 @@ pub mod terra_vault {
             vault: ctx.accounts.vault.key(),
             depositor: ctx.accounts.depositor.key(),
             amount,
-            timestamp: Clock::get()?.unix_timestamp,
+            timestamp: now,
         });
 
         Ok(())
@@ -105,13 +112,17 @@ pub mod terra_vault {
             ctx.accounts.vault_deposit.depositor == ctx.accounts.depositor.key(),
             VaultError::Unauthorized
         );
-        require!(
-            ctx.accounts.vault_deposit.amount_deposited >= amount,
-            VaultError::InsufficientBalance
-        );
 
-        ctx.accounts.vault_deposit.amount_deposited -= amount;
-        ctx.accounts.vault.total_deposits -= amount;
+        let now = Clock::get()?.unix_timestamp;
+
+        // checked_sub gives InsufficientBalance on underflow instead of a panic
+        ctx.accounts.vault_deposit.amount_deposited = ctx.accounts.vault_deposit.amount_deposited
+            .checked_sub(amount)
+            .ok_or(VaultError::InsufficientBalance)?;
+
+        ctx.accounts.vault.total_deposits = ctx.accounts.vault.total_deposits
+            .checked_sub(amount)
+            .ok_or(VaultError::InsufficientBalance)?;
 
         // PDAs can't sign for system_program::transfer, so move lamports directly.
         // The vault is owned by this program, so we can reduce its lamports.
@@ -122,7 +133,7 @@ pub mod terra_vault {
             vault: ctx.accounts.vault.key(),
             depositor: ctx.accounts.depositor.key(),
             amount,
-            timestamp: Clock::get()?.unix_timestamp,
+            timestamp: now,
         });
 
         Ok(())
@@ -131,6 +142,9 @@ pub mod terra_vault {
     /// Accrue daily interest on total vault deposits. May only be called once
     /// per 24 hours. Uses integer-only math to avoid floating-point rounding:
     /// interest = (total_deposits * daily_rate) / 36500 / 10000
+    ///
+    /// Overflow threshold: ~23 quadrillion lamports (~23M SOL) in a single vault.
+    /// checked_mul catches this and returns ArithmeticOverflow instead of a panic.
     pub fn accrue_interest(ctx: Context<AccrueInterest>) -> Result<()> {
         let vault = &mut ctx.accounts.vault;
         let clock = Clock::get()?;
@@ -141,10 +155,15 @@ pub mod terra_vault {
         // Integer-only: multiply first to preserve precision before dividing.
         // 36500 = days in a year * 100 (annualizes daily rate)
         // 10000 = basis point denominator
-        let daily_interest =
-            (vault.total_deposits * vault.daily_interest_rate) / 36500 / 10000;
+        let interest_numerator = vault.total_deposits
+            .checked_mul(vault.daily_interest_rate)
+            .ok_or(VaultError::ArithmeticOverflow)?;
+        let daily_interest = interest_numerator / 36500 / 10000;
 
-        vault.total_accrued_interest += daily_interest;
+        vault.total_accrued_interest = vault.total_accrued_interest
+            .checked_add(daily_interest)
+            .ok_or(VaultError::ArithmeticOverflow)?;
+
         vault.last_interest_accrual = clock.unix_timestamp;
 
         emit!(InterestAccrued {
