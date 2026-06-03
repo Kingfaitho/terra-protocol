@@ -1,15 +1,18 @@
 [toolchain]
 
 [features]
-resolution = true
+seeds = true
 skip-lint = false
+
+[programs.localnet]
+terra_vault = "5t7Smc2Q4ik9NrR2pr4UhaqPqA1kze1PKwhoFXWBm533"
 
 [programs.devnet]
 terra_vault = "5t7Smc2Q4ik9NrR2pr4UhaqPqA1kze1PKwhoFXWBm533"
 
-[registry]
-url = "https://api.apr.dev"
-
 [provider]
-cluster = "devnet"
+cluster = "localnet"
 wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "npx ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
